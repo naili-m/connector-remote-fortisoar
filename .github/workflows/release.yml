@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read connector metadata
+        id: connector
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata_files = sorted(Path(".").glob("*/info.json"))
+          if len(metadata_files) != 1:
+              raise SystemExit(
+                  f"Expected exactly one connector info.json at the repository root; "
+                  f"found {len(metadata_files)}"
+              )
+
+          metadata_file = metadata_files[0]
+          with metadata_file.open(encoding="utf-8") as file:
+              metadata = json.load(file)
+
+          required_fields = ("name", "label", "version")
+          missing_fields = [field for field in required_fields if not metadata.get(field)]
+          if missing_fields:
+              raise SystemExit(f"Missing required info.json fields: {', '.join(missing_fields)}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"directory={metadata_file.parent}\n")
+              for field in required_fields:
+                  output.write(f"{field}={metadata[field]}\n")
+          PY
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag matches info.json
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CONNECTOR_VERSION: ${{ steps.connector.outputs.version }}
+        run: |
+          test "$CONNECTOR_VERSION" = "$VERSION"
+
+      - name: Build connector tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CONNECTOR_NAME: ${{ steps.connector.outputs.name }}
+          CONNECTOR_DIRECTORY: ${{ steps.connector.outputs.directory }}
+        run: |
+          tar --exclude='__pycache__' -czf "connector-${CONNECTOR_NAME}-${VERSION}.tgz" "$CONNECTOR_DIRECTORY/"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ steps.connector.outputs.label }} Connector v${{ steps.version.outputs.version }}"
+          body_path: "${{ steps.connector.outputs.directory }}/release_notes.md"
+          files: "connector-${{ steps.connector.outputs.name }}-${{ steps.version.outputs.version }}.tgz"
